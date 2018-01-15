@@ -1,0 +1,266 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Duc Doan"
+date: "2018/01/14"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = -1)
+#options(width = 350)
+```
+
+## Problem Statement
+
+The goal of this classification problem will be to use the data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants asked to perform barbell lifts correctly and incorrectly in 5 different ways. Then, the classifier is built to categorize the activity of an user.
+
+## Load the Datasets
+
+Load the training dataset and testing dataset and save in the current working folder.
+
+```{r, include=TRUE, cache=FALSE, eval=TRUE}
+options(warn = -1)
+library(dplyr)
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "pml-training.csv", quiet = FALSE)
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "pml-testing.csv", quiet = FALSE)
+train.set <- read.csv("./pml-training.csv", header = TRUE)
+test.set <- read.csv("./pml-testing.csv", header = TRUE)
+train.set <- tbl_df(train.set) # transform to new data frame with more information
+test.set <- tbl_df(test.set) # transform to new data frame with more information
+```
+
+## Cleaning Data and Feature Selection
+
+In this classification problem, we only use the features with full data. After checking the datasets, the following features are chosen for the classification problem.
+
+```{r, include=TRUE, cache=FALSE, eval=TRUE}
+options(warn = -1)
+# the training dataset
+head(train.set)
+# the testing dataset
+head(test.set)
+# find column names, where their type is factor, and there is no NA data
+factor.all.column.names <- names(train.set)[sapply(train.set, is.factor)]
+factor.non.na.num <- apply(!is.na(train.set[, factor.all.column.names]), 2, sum)
+factor.column.names <- names(factor.non.na.num[factor.non.na.num > nrow(train.set)/5])
+length(factor.column.names)
+# remove the following factor columns
+factor.non.used.column.names <- c("cvtd_timestamp", "new_window", "kurtosis_roll_belt", "kurtosis_picth_belt",
+                                  "kurtosis_yaw_belt", "skewness_roll_belt", "skewness_roll_belt.1", "skewness_yaw_belt",
+                                  "max_yaw_belt", "min_yaw_belt", "amplitude_yaw_belt", "kurtosis_roll_arm", 
+                                  "kurtosis_picth_arm", "kurtosis_yaw_arm", "skewness_roll_arm", "skewness_pitch_arm",
+                                  "skewness_yaw_arm", "kurtosis_roll_dumbbell", "kurtosis_picth_dumbbell", "kurtosis_yaw_dumbbell",
+                                  "skewness_roll_dumbbell", "skewness_pitch_dumbbell", "skewness_yaw_dumbbell", "max_yaw_dumbbell",
+                                  "min_yaw_dumbbell", "amplitude_yaw_dumbbell", "kurtosis_roll_forearm", "kurtosis_picth_forearm",
+                                  "kurtosis_yaw_forearm", "skewness_roll_forearm", "skewness_pitch_forearm", "skewness_yaw_forearm",
+                                  "max_yaw_forearm", "min_yaw_forearm", "amplitude_yaw_forearm")
+# factor columns used
+factor.used.column.names <- factor.column.names[!factor.column.names %in% factor.non.used.column.names]
+# find column names, where their type is numeric, and there is no NA data
+numeric.all.column.names <- names(train.set)[sapply(train.set, is.numeric)]
+numeric.non.na.num <- apply(!is.na(train.set[, numeric.all.column.names]), 2, sum)
+numeric.column.names <- names(numeric.non.na.num[numeric.non.na.num > nrow(train.set)/5])
+length(numeric.column.names)
+# remove the following numeric columns
+numeric.non.used.column.names <- c("X", "raw_timestamp_part_1", "raw_timestamp_part_2", "num_window")
+# numeric columns used
+numeric.used.column.names <- numeric.column.names[!numeric.column.names %in% numeric.non.used.column.names]
+```
+
+## Create Cleaned Datasets for Training and Testing
+
+```{r, include=TRUE, cache=FALSE, eval=TRUE}
+options(warn = -1)
+# training dataset cleaned
+train.set.df <- train.set %>% select(c(factor.used.column.names, numeric.used.column.names))
+train.label.df <- train.set.df %>% select(c("classe")) 
+train.set.df <- train.set.df %>% select(names(train.set.df)[!names(train.set.df) %in% c("classe")])
+train.set.df$classe <- train.label.df$classe
+# testing dataset cleaned
+used.column.names <- c(factor.used.column.names, numeric.used.column.names)
+test.set.df <- test.set %>% select(used.column.names[used.column.names %in% names(test.set)])
+if (sum(names(test.set.df) %in% c("classe")) > 0) {
+    test.label.df <- test.set.df %>% select(c("classe")) 
+    test.set.df <- test.set.df %>% select(names(test.set.df)[!names(test.set.df) %in% c("classe")])
+    test.set.df$classe <- test.label.df$classe
+}
+# Create the new datasets for training and testing for convenience
+write.csv(train.set.df, "trainingset.csv", row.names = FALSE)
+write.csv(test.set.df, "testingset.csv", row.names = FALSE)
+head(train.set.df)
+head(test.set.df)
+```
+
+## Training Dataset and Testing Dataset: Feature Transformation
+
+Since there are many features in the datasets, and there might have some features that are not important for classification of user activity. We can remove some highly-correlated features. Furthermore, there might still has a large number of features, so XGBOOST is preferred for this classification problem.
+
+Since only the first feature in the datasets , i.e. user, is factor type feature. For using XGBOOST, all of the features should be numeric type. Therefore, one-hot-coding is used to transform the feature user to numeric type.
+
+```{r, include=TRUE, cache=FALSE, eval=TRUE}
+options(warn = -1)
+library(dplyr)
+library(caret)
+library(xgboost)
+# create the one hot encoder
+oneHotEncoder <- function(x, levels) { return(ifelse ((x == levels) == TRUE, 1, 0)) }
+# function to transform the factor features to numeric ones
+featureOneHotEncoder <- function(df, factorFeatureColumns) {
+    newdf <- df %>% select(-factorFeatureColumns)
+    for (i in 1:length(factorFeatureColumns)) {
+        iFactorFeatureColumn <- factorFeatureColumns[i] # get the factor feature column i
+        df[, iFactorFeatureColumn] <- as.factor(df[, iFactorFeatureColumn]) # confirm the factor type
+        iLevels <- unique(df[, iFactorFeatureColumn]) # get all levels of the factor feature column
+        iNumLevels <- length(iLevels) # the number of levels
+        idf <- data.frame(t(apply(data.frame(df[, iFactorFeatureColumn]), 1, oneHotEncoder, iLevels))) # one hot encoder
+        iColumnName <- names(df)[iFactorFeatureColumn] # the column name of the factor feature column i
+        # create column names for "idf"
+        idfNames <- character(length = iNumLevels)
+        for (j in 1:iNumLevels) {
+            idfNames[j] <- paste(paste(iColumnName, "new_column", sep = "_"), sprintf("%d", j), sep = "_")
+        }
+        names(idf) <- idfNames
+        newdf <- cbind(newdf, idf)
+    }
+    return(newdf)
+}
+# training dataset
+encoded.train.set.df <- featureOneHotEncoder(as.data.frame(train.set.df), 1)
+# testing dataset
+encoded.test.set.df <- featureOneHotEncoder(as.data.frame(test.set.df), 1)
+# correlation matrix
+correlation.matrix <- cor(encoded.train.set.df[, !names(encoded.train.set.df) %in% c("classe")])
+cut.off <- 0.9
+high.correlated.features <- findCorrelation(correlation.matrix, cutoff = cut.off)
+print(names(encoded.train.set.df)[high.correlated.features])
+# Only use the low correlated features
+correlation.matrix[upper.tri(correlation.matrix)] <- 0.0
+diag(correlation.matrix) <- 0.0
+new.train.set.df <- encoded.train.set.df %>% select(names(encoded.train.set.df)[apply(correlation.matrix, 2, function(x) any(x < cut.off))]) %>%
+    mutate(classe = encoded.train.set.df$classe)
+new.test.set.df <- encoded.test.set.df %>% select(names(encoded.test.set.df)[apply(correlation.matrix, 2, function(x) any(x < cut.off))])
+# features used for classification problem
+names(new.train.set.df)
+```
+
+## Building Model using XGBOOST algorithm
+
+XGBOOST algorithm will be used to build a model based the training dataset. The training dataset will be divided into two new dataset: (1) Training dataset for building model, and (2) Validating dataset for estimating model accuracy. 
+
+For building a model, we use k-fold cross validation method to check the default parameter configuration of XGBOOST. A confusion matrix is shown for evaluating the model accuracy.
+
+```{r, include=TRUE, cache=FALSE, eval=TRUE}
+options(warn = -1)
+library(nnet)
+library(caret)
+# label column must be categorical type (factor type)
+new.train.set.df[, "classe"] <- as.factor(new.train.set.df[, "classe"])
+# divide the the dataset into training data and validating data
+set.seed(12345)
+train <- sample(nrow(new.train.set.df), 0.99 * nrow(new.train.set.df))
+df.train <- new.train.set.df[train, ]
+df.valid <- new.train.set.df[-train, ]
+# initialize seed
+set.seed(12345)
+# number of classes in dataset
+nClasses <- length(unique(df.train[, "classe"]))
+# label of output is factor
+label.level <- unique(df.train[, "classe"])
+# convert to number
+value.level <- seq.int(0, nClasses - 1, 1)
+# define a function to convert level.factor to value.level
+label2value <- function(x, labelLevel, valueLevel) { return(valueLevel[labelLevel == x])}
+# training variables and label
+train.variables <- as.matrix(df.train[, !names(df.train) %in% c("classe")])
+train.label.level <- df.train[, "classe"]
+train.value.level <- apply(as.matrix(train.label.level), 1, label2value, label.level, value.level)
+train.matrix <- xgb.DMatrix(data = train.variables, label = train.value.level)
+# validating variables and label
+valid.variables <- as.matrix(df.valid[, !names(df.valid) %in% c("classe")])
+valid.label.level <- df.valid[, "classe"]
+valid.value.level <- apply(as.matrix(valid.label.level), 1, label2value, label.level, value.level)
+valid.matrix <- xgb.DMatrix(data = valid.variables, label = valid.value.level)
+# testing variables and label
+df.test <- new.test.set.df
+df.test[, (ncol(df.test) + 1)] <- as.factor(df.train[1:nrow(df.test), "classe"])
+names(df.test)[ncol(df.test)] <- "classe"
+test.variables <- as.matrix(df.test[, !names(df.test) %in% c("classe")])
+test.label.level <- df.test[, "classe"]
+test.value.level <- apply(as.matrix(test.label.level), 1, label2value, label.level, value.level)
+test.matrix <- xgb.DMatrix(data = test.variables, label = test.value.level)
+# parameters for XGBoost
+xgb.params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "mlogloss",
+                   "num_class" = nClasses)
+cv.nrounds <- 50 # number of XGBoost rounds
+cv.nfold <- 10 # k-fold
+# Fit cv.nfold * cv.nround XGB models and save OOF predictions
+cv.model <- xgb.cv(params = xgb.params,
+                   data = train.matrix, 
+                   nrounds = cv.nrounds,
+                   nfold = cv.nfold,
+                   verbose = FALSE,
+                   prediction = TRUE)
+# define a function to convert back value.level to level.factor
+value2label <- function(x, valueLevel, labelLevel) { return(labelLevel[valueLevel == x])}
+OOF.xgb <- data.frame(cv.model$pred) %>%
+    mutate(max.prob = max.col(., ties.method = "last"), label = train.label.level)
+OOF.xgb$predicted <- apply(data.frame(OOF.xgb$max.prob - 1), 1, value2label, value.level, as.character(label.level))
+OOF.xgb$max.prob <- NULL
+# confusion matrix in cross validation
+confusionMatrix(factor(OOF.xgb$label), factor(OOF.xgb$predicted), mode = "everything")
+```
+
+As shown in confusion matrix, since the accuracy of model is very high, we can use the default parameter configuration of XGBOOST for building the prediction model.
+
+```{r, include=TRUE, cache=FALSE, eval=TRUE}
+options(warn = -1)
+library(nnet)
+library(caret)
+nrounds <- 50
+# Fit cv.nfold * cv.nround XGB models and save OOF predictions
+fit.xgb <- xgb.train(params = xgb.params, data = train.matrix, nrounds = nrounds)
+# calculate training prediction and validating prediction
+train.xgb.value.vector <- predict(fit.xgb, newdata = train.matrix)
+valid.xgb.value.vector <- predict(fit.xgb, newdata = valid.matrix)
+test.xgb.value.vector <- predict(fit.xgb, newdata = test.matrix)
+# convert back to value level in matrix
+train.xgb.value <- matrix(train.xgb.value.vector, nrow = nClasses, ncol = nrow(train.variables)) %>%
+    t() %>% data.frame()
+valid.xgb.value <- matrix(valid.xgb.value.vector, nrow = nClasses, ncol = nrow(valid.variables)) %>%
+    t() %>% data.frame()
+test.xgb.value <- matrix(test.xgb.value.vector, nrow = nClasses, ncol = nrow(test.variables)) %>%
+    t() %>% data.frame()
+# convert back to label level
+train.xgb <- apply(data.frame(apply(train.xgb.value, 1, which.is.max) - 1),
+                   1, value2label, value.level, label.level)
+valid.xgb <- apply(data.frame(apply(valid.xgb.value, 1, which.is.max) - 1),
+                   1, value2label, value.level, label.level)
+test.xgb <- apply(data.frame(apply(test.xgb.value, 1, which.is.max) - 1),
+                  1, value2label, value.level, label.level)
+# confusion matrix with validation data
+confusionMatrix(valid.label.level, valid.xgb, mode = "everything")
+# prediction with test data
+test.xgb
+```
+
+As shown in confusion matrix with the validating dataset, the accuracy of prediction is also very high. Therefore, we expect high accuracy of prediction with the testing data is achieved.
+
+## Feature Importance Analysis
+
+In order to rank features in the dataset by their importance, we analyze their importance as follows:
+
+```{r, include=TRUE, cache=FALSE, eval=TRUE}
+options(warn = -1)
+library(caret)
+library(xgboost)
+# feature names
+feature.names <- names(df.train)[!names(df.train) %in% c("classe")]
+# important matrix
+importance.matrix = xgb.importance(feature_names = feature.names, model = fit.xgb)
+print(importance.matrix)
+# plot
+feature.importance = xgb.plot.importance(importance.matrix)
+print(feature.importance)
+```
